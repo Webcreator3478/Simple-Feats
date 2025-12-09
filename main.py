@@ -7,18 +7,16 @@ from discord import app_commands
 import typing
 import os 
 from dotenv import load_dotenv # Used for reading .env file during local development
-import threading # Used to run the bot and the web server simultaneously
+import threading 
 import http.server 
 import socketserver 
 
 # --- Load Environment Variables ---
-# Reads variables from .env file when run locally
 load_dotenv() 
 
 # --- Configuration: GET SECRETS FROM ENVIRONMENT ---
 MONGO_URI = os.environ.get("MONGO_URI") 
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") 
-# Render automatically sets the PORT variable for Web Services
 PORT = int(os.environ.get("PORT", 8080)) 
 
 # Check if essential environment variables are set.
@@ -30,7 +28,6 @@ DB_NAME = "discord_bot_db"
 COLLECTION_NAME = "user_settings"
 
 # --- Dummy Web Server to satisfy Render ---
-# This must run in a thread listening on the $PORT variable
 def run_web_server():
     """Starts a minimal HTTP server to keep Render's Web Service alive."""
     
@@ -42,7 +39,6 @@ def run_web_server():
             self.wfile.write(b"Discord Bot is alive and running.")
 
     try:
-        # TCPServer uses ('', PORT) to listen on all available interfaces
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             print(f"Dummy Web Server listening on port {PORT}")
             httpd.serve_forever()
@@ -51,8 +47,9 @@ def run_web_server():
 
 # --- Bot and Database Initialization ---
 intents = discord.Intents.default()
-# If you use prefix commands like !clear or !poll, you must enable message_content intent
-# intents.message_content = True 
+# REQUIRED: Must enable this intent for !clear and !poll to read message content
+intents.message_content = True 
+intents.members = True # Best practice for moderation commands like !clear
 bot = commands.Bot(command_prefix='!', intents=intents) 
 tree = bot.tree 
 
@@ -82,16 +79,56 @@ FORMAT_OPTIONS = [
 @bot.event
 async def on_ready():
     """Sync slash commands when the bot is ready."""
-    await bot.change_presence(activity=discord.Game(name="/timestamp | /timezone"))
+    await bot.change_presence(activity=discord.Game(name="/timestamp | !poll"))
     
     try:
-        # Sync global slash commands
         synced = await tree.sync()
         print(f"Synced {len(synced)} command(s).")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
     print(f'Bot is ready! Logged in as {bot.user}')
+
+
+# --- Traditional Commands (Using ! Prefix) ---
+
+@bot.command(name='clear')
+@commands.has_permissions(manage_messages=True)
+async def clear_messages(ctx, amount: int):
+    """Deletes a specified number of messages (requires Manage Messages permission)."""
+    if amount > 100:
+        await ctx.send("I can only clear up to 100 messages at a time.")
+        return
+    # Delete 'amount' messages + 1 (to delete the command message itself)
+    await ctx.channel.purge(limit=amount + 1) 
+    await ctx.send(f'🧹 **{amount}** messages cleared by {ctx.author.mention}.', delete_after=5)
+
+@bot.command(name='poll')
+async def create_poll(ctx, question, *options):
+    """Creates a poll with up to 10 options."""
+    if len(options) > 10:
+        await ctx.send("You can only provide up to 10 options for the poll.") 
+        return
+        
+    # Standard reaction emojis for polls
+    emojis = ['\u24C0', '\u24B7', '\u24B8', '\u24B9', '\u24BA', '\u24BB', '\u24BC', '\u24BD', '\u24BE', '\u24BF']
+    
+    poll_description = "".join([f'{emojis[i]} **{option}**\n' for i, option in enumerate(options)])
+    
+    embed = discord.Embed(
+        title=f'📊 NEW POLL: {question}', 
+        description=poll_description, 
+        color=discord.Color.blue()
+    )
+    
+    poll_message = await ctx.send(embed=embed)
+    
+    # Add reactions based on the number of options
+    for i in range(len(options)):
+        await poll_message.add_reaction(emojis[i])
+        
+    # Delete the user's command message
+    await ctx.message.delete()
 
 
 # --- Slash Commands: Timezone Management ---
@@ -159,21 +196,25 @@ async def generate_timestamp_slash(
         # 2. Convert input to a datetime object
         tz = pytz.timezone(timezone)
         
-        # Simple parsing logic 
+        # Simple parsing logic for different formats
         try:
             # Try YYYY-MM-DD HH:MM format first
             dt_object = datetime.datetime.strptime(date_time, '%Y-%m-%d %H:%M')
         except ValueError:
-            # Try a common American format if the first fails
+            # Try DD-MM-YYYY HH:MM format (requested default date style)
             try:
-                dt_object = datetime.datetime.strptime(date_time, '%m/%d/%Y %I:%M%p')
+                dt_object = datetime.datetime.strptime(date_time, '%d-%m-%Y %H:%M')
             except ValueError:
-                 await interaction.followup.send(
-                    f"❌ Date/Time Format Error: Could not parse `{date_time}`. "
-                    f"Please use a format like `YYYY-MM-DD HH:MM` (e.g., `2025-12-31 23:59`).", 
-                    ephemeral=True
-                )
-                 return
+                # Try a common American format if the first fails
+                try:
+                    dt_object = datetime.datetime.strptime(date_time, '%m/%d/%Y %I:%M%p')
+                except ValueError:
+                     await interaction.followup.send(
+                        f"❌ Date/Time Format Error: Could not parse `{date_time}`. "
+                        f"Please use a format like `YYYY-MM-DD HH:MM` or `DD-MM-YYYY HH:MM` (e.g., `2025-12-31 23:59`).", 
+                        ephemeral=True
+                    )
+                     return
 
         # 3. Localize and Convert to UTC
         localized_dt = tz.localize(dt_object, is_dst=None)
@@ -190,6 +231,7 @@ async def generate_timestamp_slash(
         embed = discord.Embed(
             title="⏱️ Generated Timestamp",
             description=(
+                # Date format updated to strictly dd-mm-yyyy HH:MM
                 f"**Input Time:** {localized_dt.strftime('%d-%m-%Y %H:%M')} {timezone.upper()} "
                 f"{'(Your Default)' if default_zone_used else ''}\n"
                 f"**Unix Time:** `{unix_timestamp}`"
@@ -219,7 +261,7 @@ async def generate_timestamp_slash(
 if __name__ == '__main__':
     # 1. Start the dummy web server in a separate thread
     server_thread = threading.Thread(target=run_web_server)
-    server_thread.daemon = True # Set as daemon so it won't prevent the program from exiting if the bot stops
+    server_thread.daemon = True 
     server_thread.start()
     
     # 2. Start the Discord Bot (This call blocks the main thread)
