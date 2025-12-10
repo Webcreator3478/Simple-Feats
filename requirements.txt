@@ -3,3 +3,4 @@ motor
 pytz
 python-dotenv
 dnspython
+pymongo
