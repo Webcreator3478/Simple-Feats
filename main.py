@@ -25,8 +25,8 @@ if not MONGO_URI or not BOT_TOKEN:
     exit(1) 
 
 DB_NAME = "discord_bot_db" 
-COLLECTION_NAME_USER = "user_settings" # Renamed for clarity
-COLLECTION_NAME_GUILD = "guild_settings" # New collection name
+COLLECTION_NAME_USER = "user_settings" 
+COLLECTION_NAME_GUILD = "guild_settings" 
 
 # --- Dummy Web Server to satisfy Render ---
 def run_web_server():
@@ -198,7 +198,7 @@ async def set_server_timezone_slash(interaction: discord.Interaction, timezone: 
 
 @tree.command(name="timestamp", description="Generate a Discord-compatible timestamp from a date/time.")
 @app_commands.describe(
-    date_time="The date and time (e.g., '2025-01-01 10:00', '31-12-2025 23:59', '12-31-2025 11:59PM').",
+    date_time="The date and time in one of these formats: YYYY-MM-DD HH:MM, DD-MM-YYYY HH:MM, or MM-DD-YYYY HH:MM.",
     timezone="Optional: The timezone for the input. Overrides user/server defaults.",
     format_style="Optional: The desired display format."
 )
@@ -239,19 +239,14 @@ async def generate_timestamp_slash(
         # Validate the determined timezone
         tz = pytz.timezone(timezone)
         
-        # 2. Convert input to a datetime object, checking multiple formats (Enhanced Logic)
+        # 2. Convert input to a datetime object, strictly checking required formats
         dt_object = None
         
-        # List of supported formats to try: YYYY-MM-DD, DD-MM-YYYY, MM-DD-YYYY
-        # We assume HH:MM is always present.
+        # REQUIRED FORMATS ONLY
         formats_to_try = [
-            '%Y-%m-%d %H:%M',  # 2025-12-31 16:20 (Standard ISO)
-            '%d-%m-%Y %H:%M',  # 31-12-2025 16:20 (European/DD-MM)
-            '%m-%d-%Y %H:%M',  # 12-31-2025 16:20 (American/MM-DD)
-            # Add common 12-hour AM/PM formats as a fallback
-            '%Y-%m-%d %I:%M%p',
-            '%d-%m-%Y %I:%M%p',
-            '%m-%d-%Y %I:%M%p',
+            '%Y-%m-%d %H:%M',  # 2025-12-31 16:20
+            '%d-%m-%Y %H:%M',  # 31-12-2025 16:20
+            '%m-%d-%Y %H:%M',  # 12-31-2025 16:20
         ]
         
         for fmt in formats_to_try:
@@ -262,9 +257,11 @@ async def generate_timestamp_slash(
                 continue
 
         if dt_object is None:
+             # STRICT ERROR MESSAGE for non-compliant input
              await interaction.followup.send(
                 f"❌ Date/Time Format Error: Could not parse `{date_time}`. "
-                f"Please use a format like `YYYY-MM-DD HH:MM`, `DD-MM-YYYY HH:MM`, or `MM-DD-YYYY HH:MM` (e.g., `2025-12-31 23:59`).", 
+                f"Please use one of the **required 24-hour formats**: "
+                f"`YYYY-MM-DD HH:MM`, `DD-MM-YYYY HH:MM`, or `MM-DD-YYYY HH:MM` (e.g., `2025-12-31 23:59`).", 
                 ephemeral=True
             )
              return
