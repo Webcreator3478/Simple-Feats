@@ -6,7 +6,7 @@ import motor.motor_asyncio
 from discord import app_commands
 import typing
 import os 
-from dotenv import load_dotenv
+from dotenv import load_dotenv # Used for reading .env file during local development
 import threading 
 import http.server 
 import socketserver 
@@ -25,8 +25,7 @@ if not MONGO_URI or not BOT_TOKEN:
     exit(1) 
 
 DB_NAME = "discord_bot_db" 
-COLLECTION_NAME_USER = "user_settings" 
-COLLECTION_NAME_GUILD = "guild_settings" 
+COLLECTION_NAME = "user_settings" # This collection now stores settings keyed by (user_id, guild_id)
 
 # --- Dummy Web Server to satisfy Render ---
 def run_web_server():
@@ -48,8 +47,9 @@ def run_web_server():
 
 # --- Bot and Database Initialization ---
 intents = discord.Intents.default()
+# REQUIRED: Must enable this intent for !clear and !poll to read message content
 intents.message_content = True 
-intents.members = True 
+intents.members = True # Best practice for moderation commands like !clear
 bot = commands.Bot(command_prefix='!', intents=intents) 
 tree = bot.tree 
 
@@ -57,8 +57,7 @@ tree = bot.tree
 try:
     client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
     db = client[DB_NAME]
-    settings_collection = db[COLLECTION_NAME_USER] # User settings (keyed by user ID)
-    guild_settings_collection = db[COLLECTION_NAME_GUILD] # Guild settings (keyed by guild ID)
+    settings_collection = db[COLLECTION_NAME]
     print("MongoDB connection initiated.")
 except Exception as e:
     print(f"Error connecting to MongoDB: {e}")
@@ -134,10 +133,14 @@ async def create_poll(ctx, question, *options):
 
 # --- Slash Commands: Timezone Management ---
 
-@tree.command(name="set_my_timezone", description="Set your personal default timezone for timestamp generation.")
+@tree.command(name="timezone", description="Set your personal timezone for this server.")
 @app_commands.describe(timezone="The timezone name (e.g., Europe/Amsterdam, America/New_York)")
-async def set_user_timezone_slash(interaction: discord.Interaction, timezone: str):
+async def set_timezone_slash(interaction: discord.Interaction, timezone: str):
     await interaction.response.defer(ephemeral=True)
+
+    if interaction.guild_id is None:
+        await interaction.followup.send("This command must be used inside a server to set a server-specific timezone.", ephemeral=True)
+        return
 
     try:
         pytz.timezone(timezone) # Validate the timezone string
@@ -149,47 +152,15 @@ async def set_user_timezone_slash(interaction: discord.Interaction, timezone: st
         )
         return
 
-    # Update or insert user setting in the database (User ID is the key)
+    # Update or insert user setting in the database using both guild_id and user_id
     await settings_collection.update_one(
-        {"_id": interaction.user.id},
+        {"guild_id": interaction.guild_id, "user_id": interaction.user.id},
         {"$set": {"timezone": timezone}},
         upsert=True
     )
     
     await interaction.followup.send(
-        f"✅ Your **personal** default timezone has been set to `{timezone}`.", 
-        ephemeral=True
-    )
-
-@tree.command(name="set_server_timezone", description="Set the default timezone for this server. (Admins only)")
-@app_commands.describe(timezone="The timezone name (e.g., Europe/Amsterdam, America/New_York)")
-@app_commands.default_permissions(manage_guild=True) # Restrict to admins
-async def set_server_timezone_slash(interaction: discord.Interaction, timezone: str):
-    if interaction.guild_id is None:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-        
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        pytz.timezone(timezone) # Validate the timezone string
-    except pytz.exceptions.UnknownTimeZoneError:
-        await interaction.followup.send(
-            f"❌ Timezone Error: The timezone `{timezone}` is invalid. Please check the spelling. "
-            f"Example: `Europe/London`.", 
-            ephemeral=True
-        )
-        return
-
-    # Update or insert server setting in the database (Guild ID is the key)
-    await guild_settings_collection.update_one(
-        {"_id": interaction.guild_id},
-        {"$set": {"default_timezone": timezone}},
-        upsert=True
-    )
-    
-    await interaction.followup.send(
-        f"✅ The **server's** default timezone has been set to `{timezone}`.", 
+        f"✅ Your timezone for **this server** has been set to `{timezone}`.", 
         ephemeral=True
     )
 
@@ -199,7 +170,7 @@ async def set_server_timezone_slash(interaction: discord.Interaction, timezone: 
 @tree.command(name="timestamp", description="Generate a Discord-compatible timestamp from a date/time.")
 @app_commands.describe(
     date_time="The date and time in one of these formats: YYYY-MM-DD HH:MM, DD-MM-YYYY HH:MM, or MM-DD-YYYY HH:MM.",
-    timezone="Optional: The timezone for the input. Overrides user/server defaults.",
+    timezone="Optional: The timezone for the input. Defaults to your saved timezone for this server.",
     format_style="Optional: The desired display format."
 )
 @app_commands.choices(format_style=FORMAT_OPTIONS)
@@ -215,40 +186,37 @@ async def generate_timestamp_slash(
     user_tz = None
 
     try:
-        # 1. Determine Timezone Priority: Argument > User Setting > Server Setting > UTC
+        # 1. Determine Timezone Priority: Argument > User Setting (Server-specific) > UTC
         if not timezone:
-            # Check for User Setting
-            user_setting = await settings_collection.find_one({"_id": interaction.user.id})
-            if user_setting and "timezone" in user_setting:
-                user_tz = user_setting["timezone"]
-                timezone = user_tz
-                default_zone_source = "(Your Personal Default)"
-            elif interaction.guild_id:
-                # Check for Server Setting (if in a guild)
-                guild_setting = await guild_settings_collection.find_one({"_id": interaction.guild_id})
-                if guild_setting and "default_timezone" in guild_setting:
-                    timezone = guild_setting["default_timezone"]
-                    default_zone_source = "(Server Default)"
+            if interaction.guild_id:
+                # Check for User Setting specific to this Guild
+                user_setting = await settings_collection.find_one(
+                    {"guild_id": interaction.guild_id, "user_id": interaction.user.id}
+                )
+                if user_setting and "timezone" in user_setting:
+                    user_tz = user_setting["timezone"]
+                    timezone = user_tz
+                    default_zone_source = "(Your Server-Specific Default)"
                 else:
-                    # Fallback to UTC
-                    timezone = 'UTC' 
+                    # Fallback to UTC if no setting for this user/server exists
+                    timezone = 'UTC'
             else:
-                 # Fallback to UTC for DMs
+                 # Fallback to UTC for DMs (no guild_id)
                  timezone = 'UTC'
-        
+
         # Validate the determined timezone
         tz = pytz.timezone(timezone)
-        
+
         # 2. Convert input to a datetime object, strictly checking required formats
         dt_object = None
-        
-        # REQUIRED FORMATS ONLY
+
+        # REQUIRED FORMATS ONLY (24-hour clock)
         formats_to_try = [
             '%Y-%m-%d %H:%M',  # 2025-12-31 16:20
             '%d-%m-%Y %H:%M',  # 31-12-2025 16:20
             '%m-%d-%Y %H:%M',  # 12-31-2025 16:20
         ]
-        
+
         for fmt in formats_to_try:
             try:
                 dt_object = datetime.datetime.strptime(date_time, fmt)
@@ -261,7 +229,7 @@ async def generate_timestamp_slash(
              await interaction.followup.send(
                 f"❌ Date/Time Format Error: Could not parse `{date_time}`. "
                 f"Please use one of the **required 24-hour formats**: "
-                f"`YYYY-MM-DD HH:MM`, `DD-MM-YYYY HH:MM`, or `MM-DD-YYYY HH:MM` (e.g., `2025-12-31 23:59`).", 
+                f"`YYYY-MM-DD HH:MM`, `DD-MM-YYYY HH:MM`, or `MM-DD-YYYY HH:MM` (e.g., `2025-12-31 23:59`).",
                 ephemeral=True
             )
              return
@@ -281,8 +249,9 @@ async def generate_timestamp_slash(
         embed = discord.Embed(
             title="⏱️ Generated Timestamp",
             description=(
-                # Use a consistent display format for the input time
-                f"**Input Time:** {localized_dt.strftime('%d-%m-%Y %H:%M')} {timezone.upper()} {default_zone_source}\n" 
+                # Date format updated to strictly dd-mm-yyyy HH:MM
+                f"**Input Time:** {localized_dt.strftime('%d-%m-%Y %H:%M')} {timezone.upper()} "
+                f"{default_zone_source}\n"
                 f"**Unix Time:** `{unix_timestamp}`"
             ),
             color=discord.Color.blue()
@@ -302,9 +271,7 @@ async def generate_timestamp_slash(
             ephemeral=True
         )
     except Exception as e:
-        # General catch-all for other unexpected issues
-        print(f"Timestamp error: {e}")
-        await interaction.followup.send(f"An unexpected error occurred. Please check your input and try again.", ephemeral=True)
+        await interaction.followup.send(f"An unexpected error occurred: `{e}`", ephemeral=True)
 
 
 # --- Run Bot ---
