@@ -79,7 +79,7 @@ FORMAT_OPTIONS = [
 @bot.event
 async def on_ready():
     """Sync slash commands when the bot is ready."""
-    await bot.change_presence(activity=discord.Game(name="/timestamp | !poll"))
+    await bot.change_presence(activity=discord.Game(name="Roblox"))
     
     try:
         synced = await tree.sync()
@@ -287,3 +287,4 @@ if __name__ == '__main__':
         bot.run(BOT_TOKEN)
     except Exception as e:
         print(f"Error running Discord bot: {e}")
+
